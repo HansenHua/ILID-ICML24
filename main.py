@@ -29,15 +29,13 @@ EPS = 1e-7
 # W&B
 def wandb_init(config) -> None:
     env = config.env_s.split('-')[0].capitalize()
-    imperfect = "-".join(config.env_s.split('-')[1:-1]).capitalize()
-    # imperfect = config.env_s.split('-')[1].capitalize()
+    imperfect = config.env_s.split('-')[1].capitalize()
     expert = config.env_e.split('-')[1].capitalize()
     name = f"{str(uuid.uuid4())[:8]}"
     wandb.init(
         config=config,
         project="iLID",
-        # group=f"iLID-{env}-{expert}_{config.num_e}-{imperfect}_{config.num_s_s}_{config.num_s_e}",
-        group=f"Ablation-iLID-{env}-{imperfect}-E{config.num_e}-B{config.bar}",
+        group=f"{env}-{expert}_{config.num_e}-{imperfect}_{config.num_s_s}_{config.num_s_e}",
         name=f"Seed_{config.seed}-{name}",
         id=str(uuid.uuid4()),
     )
@@ -362,9 +360,9 @@ class iLID(object):
             state_dim,
             action_dim,
             device,
-            no_pu=True,  # *
+            no_pu=False,
             eta=0.5,
-            d_steps=100000,
+            d_steps=100_000,
             policy_lr=1e-5,
             regularization=0.005,
             alpha=1.0,
@@ -402,9 +400,8 @@ class iLID(object):
         self.total_it = 0
         self.total_it_bc = 0
 
-    def alpha_and_alpha_loss(self, log_pi):
-        # alpha_loss = self.log_alpha().exp() * (torch.mean(log_pi) + self.epsilon - torch.mean(log_pi_e)).detach()
-        alpha_loss = self.log_alpha().exp() * (torch.mean(log_pi) + self.epsilon).detach()
+    def alpha_and_alpha_loss(self, log_pi, log_pi_e):
+        alpha_loss = self.log_alpha().exp() * (torch.mean(log_pi) + self.epsilon - torch.mean(log_pi_e)).detach()
         alpha = self.log_alpha().exp()
         return alpha, alpha_loss
 
@@ -472,44 +469,32 @@ class iLID(object):
         replay_buffer_s.size = replay_buffer_s.state.shape[0]
         return replay_buffer_s
 
-    def train_policy(self, replay_buffer_e, replay_buffer_s, replay_buffer_u, d, batch_size=256):
+    def train_policy(self, replay_buffer_s, replay_buffer_e, batch_size=256):
         self.total_it += 1
 
         # Sample from D_e and D_s
         minibatch = batch_size
-        state_u, action_u, nxt_state_u, _, _, _, weight_s, _ = replay_buffer_u.sample(minibatch)
-        state_s, action_s, nxt_state_s, _, _, _, weight_s, _ = replay_buffer_s.sample(minibatch)  # change
+        state_s, action_s, _, _, _, _, weight_s, _ = replay_buffer_s.sample(minibatch)
+        state_e, action_e, _, _, _, _, weight_e, _ = replay_buffer_e.sample(minibatch)
 
         # Compute log_prob
         log_pi_s = self.policy.get_log_density(state_s, action_s)
-        log_pi_u = self.policy.get_log_density(state_u, action_u)
+        log_pi_e = self.policy.get_log_density(state_e, action_e)
 
         # Update alpha
-        # if self.automatic_alpha_tuning:
-            # if self.log_policy_e is not None:
-            #     log_pi_e_e = self.log_policy_e
-            # else:
-            #     log_pi_e_e = self.policy_e.get_log_density(state_e, action_e)
+        if self.automatic_alpha_tuning:
+            if self.log_policy_e is not None:
+                log_pi_e_e = self.log_policy_e
+            else:
+                log_pi_e_e = self.policy_e.get_log_density(state_e, action_e)
 
-            # self.alpha, alpha_loss = self.alpha_and_alpha_loss(torch.sum(log_pi_e, 1), torch.sum(log_pi_e_e, 1))
-            # self.alpha, alpha_loss = self.alpha_and_alpha_loss(torch.sum(log_pi_e, 1))
-            # self.alpha_optimizer.zero_grad()
-            # alpha_loss.backward()
-            # self.alpha_optimizer.step()
+            self.alpha, alpha_loss = self.alpha_and_alpha_loss(torch.sum(log_pi_e, 1), torch.sum(log_pi_e_e, 1))
+            self.alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            self.alpha_optimizer.step()
 
         # Compute policy loss
-        # p_loss = torch.mean(-torch.sum(log_pi_s, 1) * weight_s) + self.alpha * torch.mean(-torch.sum(log_pi_e, 1))
-
-        # Change C
-        ########################################
-        # Prior: p_loss = torch.mean(-torch.sum(log_pi_s, 1)) + self.alpha * torch.mean(-torch.sum(log_pi_e, 1))
-        # p_loss = torch.mean(-torch.sum(log_pi_s, 1)) + self.alpha * torch.mean(-torch.sum(iw * log_pi_e, 1))
-        iw = d(state_u, action_u).detach() / (1 - d(state_u, action_u).detach())
-        # print(policy.discriminator(state_s).detach() / (1 - policy.discriminator(state_s).detach()))
-        weight = torch.where(policy.discriminator(state_s).detach() < args.bar, torch.tensor(1).to(device), torch.tensor(0).to(device))
-       
-        p_loss = torch.mean(-torch.sum(log_pi_u * iw, 1)) + torch.mean(-torch.sum(log_pi_s, 1))
-        ########################################
+        p_loss = torch.mean(-torch.sum(log_pi_s, 1) * weight_s) + self.alpha * torch.mean(-torch.sum(log_pi_e, 1))
 
         # Optimize the policy
         self.policy_optimizer.zero_grad()
@@ -522,7 +507,7 @@ class iLID(object):
         self.total_it_bc += 1
 
         # Sample from D_e
-        state_e, action_e, _, _, _, _, _ = replay_buffer_e.sample(batch_size)
+        state_e, action_e, _, _, _, _, weight_e, _ = replay_buffer_e.sample(batch_size)
 
         # Compute log_prob
         log_pi_e = self.policy_e.get_log_density(state_e, action_e)
@@ -578,15 +563,15 @@ def eval_policy(time_steps, policy, env_name, seed, mean, std, policy_loss, n_se
     policy.policy_e.train() if is_policy_e else policy.policy.train()
 
     # wandb info
-    # if not is_policy_e:
-    #     wandb.log(
-    #         {"average_returns": avg_reward,
-    #          "d4rl_normalized_score": d4rl_score,
-    #          "policy_loss": policy_loss,
-    #          "selected_data": n_selected_data,
-    #          "alpha": alpha,
-    #          },
-    #         step=time_steps)
+    if not is_policy_e:
+        wandb.log(
+            {"average_returns": avg_reward,
+             "d4rl_normalized_score": d4rl_score,
+             "policy_loss": policy_loss,
+             "selected_data": n_selected_data,
+             "alpha": alpha,
+             },
+            step=time_steps)
 
     print("---------------------------------------")
     print(f"Env: {env_name}, Evaluation over {eval_episodes} episodes: {avg_reward:.3f}, D4RL score: {d4rl_score:.3f}, "
@@ -594,86 +579,36 @@ def eval_policy(time_steps, policy, env_name, seed, mean, std, policy_loss, n_se
     print("---------------------------------------")
     return d4rl_score
 
-class Discriminator_sa(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super(Discriminator_sa, self).__init__()
-
-        self.fc1 = nn.Linear(state_dim+action_dim, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, 1)
-
-    def forward(self, state, action):
-        state_action = torch.cat([state, action], dim=1)
-        d = F.relu(self.fc1(state_action))
-        d = F.relu(self.fc2(d))
-        d = torch.sigmoid(self.fc3(d))
-        d = torch.clip(d, 0.1, 0.9)
-        return d
-    
-
-def train_disc(discriminator, replay_buffer_e, replay_buffer_u, batch_size=256):
-    discriminator_optimizer = torch.optim.Adam(discriminator.parameters(), lr=1e-5, weight_decay=0.005)
-    for t in range(int(100000)):
-        # Sample states from D_e and D_s
-        state_e, action_e, _, _, _, _, _, _ = replay_buffer_e.sample(batch_size)
-        state_u, action_u, _, _, _, _, _, _ = replay_buffer_u.sample(batch_size)
-
-        # Compute discriminator loss
-        d_e = discriminator(state_e, action_e)
-        d_u = discriminator(state_u, action_u)
-        d_loss_e = -torch.log(d_e)
-        d_loss_u = -torch.log(1 - d_u)
-        d_loss = torch.mean(d_loss_e + d_loss_u)
-
-        # Optimize the discriminator
-        discriminator_optimizer.zero_grad()
-        d_loss.backward()
-        discriminator_optimizer.step()
-
-        if (t + 1) % 5000 == 0:
-            print(f"Discriminator loss ({t + 1}/{int(100000)}): {d_loss:.3f}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Experiment
     parser.add_argument("--root_dir", default="results")  # Root dir
     parser.add_argument("--algorithm", default="iLID")  # Algorithm name
-    parser.add_argument('--env_e', default="halfcheetah-expert-v2")  # Expert environment
-    parser.add_argument('--env_s', default="halfcheetah-random-v2")  # Imperfect environment
+    parser.add_argument('--env_e', default="hopper-expert-v2")  # Expert environment
+    parser.add_argument('--env_s', default="hopper-random-v2")  # imperfect environment
     parser.add_argument("--num_e", default=1, type=int)  # Expert trajs
-    parser.add_argument("--num_s_e", default=0, type=int)  # Expert trajs in the imperfect dataset
-
-    # * Change to 1000
-    parser.add_argument("--num_s_s", default=1_000, type=int)  # Low-quality trajs in the imperfect dataset
-
+    parser.add_argument("--num_s_e", default=10, type=int)  # Expert trajs in the imperfect dataset
+    parser.add_argument("--num_s_s", default=1000, type=int)  # Low-quality trajs in the imperfect dataset
     parser.add_argument("--seed", default=0, type=int)  # Sets Gym, PyTorch and Numpy seeds
     parser.add_argument("--eval_freq", default=20000, type=int)  # How often (time steps) we evaluate
-    parser.add_argument("--max_timesteps", default=1_000_000, type=int)  # Max time steps for training the policy
-    parser.add_argument("--policy_lr", default=1e-4, type=float)  # Policy learning rate
+    parser.add_argument("--max_timesteps", default=2_000_000, type=int)  # Max time steps for training the policy
+    parser.add_argument("--policy_lr", default=1e-5, type=float)  # Policy learning rate
     parser.add_argument("--regularization", default=0.005, type=float)  # Decay for Adam
     parser.add_argument("--batch_size", default=256, type=int)  # Batch size for training
     parser.add_argument("--no_normalize", action='store_true')  # If normalizing states
     # iLID
-    parser.add_argument("--d_steps", default=100000, type=int)  # Max time steps for training the discriminator
-    parser.add_argument("--weight_init", default=1.0, type=float)  # Initial value of the weight
-    parser.add_argument("--decay", default=1.0, type=float)  # Decay for rollback actions
-    parser.add_argument("--rollback", default=20, type=int)  # Rollback steps
-
-    # * Could be smaller?
-    parser.add_argument("--bar", default=0.4, type=float)  # Bar for selecting good data
-    
+    parser.add_argument("--d_steps", default=100_000, type=int)  # Max time steps for training the discriminator
+    parser.add_argument("--weight_init", default=1., type=float)  # Initial value of the weight
+    parser.add_argument("--decay", default=.9, type=float)  # Decay for rollback actions
+    parser.add_argument("--rollback", default=5, type=int)  # Rollback steps
+    parser.add_argument("--bar", default=0.89, type=float)  # Bar for selecting good data
     parser.add_argument("--alpha", default=1.0, type=float)  # Value of alpha (initialization)
     parser.add_argument("--automatic_alpha_tuning", default=True, type=bool)  # If tuning alpha automatically
-    parser.add_argument("--bc_steps", default=0, type=int)  # BC steps
-
-    # * Could be small like 0.1
-    parser.add_argument("--epsilon", default=0.1, type=float)  # KL divergence upperbound
-
-    parser.add_argument("--bc_init", default=False, type=bool)  # If using policy_e as initialization
-
-    # *
-    # parser.add_argument("--no_pu", action='store_true')  # If using the PU trick
-
+    parser.add_argument("--bc_steps", default=200_000, type=int)  # BC steps
+    parser.add_argument("--epsilon", default=.01, type=float)  # KL divergence upperbound
+    parser.add_argument("--bc_init", default=True, type=bool)  # If using policy_e as initialization
+    parser.add_argument("--no_pu", action='store_true')  # If using the PU trick
     parser.add_argument("--eta", default=0.5, type=float)  # Balancing positive-unlabeled learning
     args = parser.parse_args()
 
@@ -709,7 +644,7 @@ if __name__ == "__main__":
     policy = iLID(state_dim,
                   action_dim,
                   device,
-                  no_pu=True,  # *
+                  no_pu=args.no_pu,
                   eta=args.eta,
                   d_steps=args.d_steps,
                   policy_lr=args.policy_lr,
@@ -746,70 +681,53 @@ if __name__ == "__main__":
     replay_buffer_s.normalize_states(mean=shift, std=scale)
 
     # wandb info
-    # wandb_init(args)
+    wandb_init(args)
 
     eval_log = open(save_dir, 'w')
 
-    # Change A
-    ########################################
-    replay_buffer_u = ReplayBuffer(state_dim, action_dim, device)
-    replay_buffer_u.add_transitions(replay_buffer_e)
-    # Train another discriminator d0 to distinguish replay_buffer_e and replay_buffer_u, the same as that of offline-to-online Eq.(6)
-    ########################################
-
     # Warnings
-    # if replay_buffer_e.size >= 10000:
-    #     warnings.warn(f"# expert state-actions: {replay_buffer_e.size}, consider increasing d_steps & bc-steps!",
-    #                   UserWarning)
+    if replay_buffer_e.size >= 10000:
+        warnings.warn(f"# expert state-actions: {replay_buffer_e.size}, consider increasing d_steps & bc-steps!",
+                      UserWarning)
 
     # Train discriminator
     policy.train_discriminator(replay_buffer_e, replay_buffer_s, args.batch_size)
 
     # Select good state-actions from imperfect demonstrations
-    replay_buffer_s = policy.select_data(replay_buffer_s, args.bar, args.rollback, args.decay, weight_init=args.decay)
+    replay_buffer_s = policy.select_data(replay_buffer_s, args.bar, args.rollback, args.decay, args.weight_init)
     n_selected_data = replay_buffer_s.size
     print(f"# selected positive imperfect state-actions: {n_selected_data}")
-    replay_buffer_u.add_transitions(replay_buffer_s)
-
-    d = Discriminator_sa(state_dim, action_dim).to(device)
-    train_disc(d, replay_buffer_e, replay_buffer_u)
 
     # Add expert data into the imperfect dataset
-    # replay_buffer_s.add_transitions(replay_buffer_e)
+    replay_buffer_s.add_transitions(replay_buffer_e)
     print(f"# training state-actions: {replay_buffer_s.size}")
 
     # Train BC policy
-    # if args.automatic_alpha_tuning:
-    #     for t in range(int(args.bc_steps)):
-    #         policy_e_loss = policy.train_policy_e(replay_buffer_e)
-    #         # Evaluate BC policy
-    #         if (t == 0) | ((t + 1) % args.eval_freq == 0):
-    #             print(f"(BC) Time steps: {t + 1}")
-    #             # average_returns = eval_policy(t + 1, policy, args.env_e, args.seed, shift, scale, policy_e_loss,
-    #             #                               is_policy_e=True, n_selected_data=n_selected_data, alpha=policy.alpha)
+    if args.automatic_alpha_tuning:
+        for t in range(int(args.bc_steps)):
+            policy_e_loss = policy.train_policy_e(replay_buffer_e)
+            # Evaluate BC policy
+            if (t == 0) | ((t + 1) % args.eval_freq == 0):
+                print(f"(BC) Time steps: {t + 1}")
+                average_returns = eval_policy(t + 1, policy, args.env_e, args.seed, shift, scale, policy_e_loss,
+                                              is_policy_e=True, n_selected_data=n_selected_data, alpha=policy.alpha)
 
-    #     # Use policy_e to initialize imitation policy
-    #     if args.bc_init:
-    #         policy.policy.load_state_dict(policy.policy_e.state_dict())
+        # Use policy_e to initialize imitation policy
+        if args.bc_init:
+            policy.policy.load_state_dict(policy.policy_e.state_dict())
 
-    #     # Compute the expected entropy w.r.t. policy_e
-    #     state_e, action_e, _, _, _, _, _ = replay_buffer_e.sample(replay_buffer_e.size)
-    #     policy.log_policy_e = policy.policy_e.get_log_density(state_e, action_e) # Change
+        # Compute the expected entropy w.r.t. policy_e
+        state_e, action_e, _, _, _, _, _, _ = replay_buffer_e.sample(replay_buffer_e.size)
+        policy.log_policy_e = policy.policy_e.get_log_density(state_e, action_e)
 
     # Train imitation policy
     for t in range(int(args.max_timesteps)):
-
-        # Change B
-        ########################################
-        # Prior: policy_loss = policy.train_policy(replay_buffer_s, replay_buffer_e)
-        policy_loss = policy.train_policy(replay_buffer_e, replay_buffer_s, replay_buffer_u, d)
-        ########################################
-
+        policy_loss = policy.train_policy(replay_buffer_s, replay_buffer_e)
         # Evaluate imitation policy
         if (t == 0) | ((t + 1) % args.eval_freq == 0):
             print(f"(iLID) Time steps: {t + 1}")
             average_returns = eval_policy(t + 1, policy, args.env_e, args.seed, shift, scale, policy_loss,
-                                        n_selected_data=n_selected_data, alpha=policy.alpha)
+                                          n_selected_data=n_selected_data, alpha=policy.alpha)
             eval_log.write(f'{t + 1}\t{average_returns}\n')
             eval_log.flush()
     eval_log.close()
