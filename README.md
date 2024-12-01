@@ -10,7 +10,7 @@ we introduce a simple yet effective data selection method that identifies positi
 ### Installation
 1. Clone repo
     ```bash
-    git clone [https://github.com/HansenHua/ILID-offline-imitation-learning.git](https://github.com/HansenHua/ILID-offline-imitation-learning.git)
+    git clone [https://github.com/HansenHua/ILID-ICML24.git](https://github.com/HansenHua/ILID-ICML24.git)
     cd ILID-offline-imitation-learning
     ```
 2. Install dependent packages
@@ -37,8 +37,8 @@ You could adapt it to your own needs.
 ## :checkered_flag: Testing
 Illustration
 
-We alse provide the performance of our model. The illustration videos are stored in [ILID-offline-imitation-learning/performance](https://github.com/HansenHua/ILID-offline-imitation-learning/tree/main/performance).
+We alse provide the performance of our model. The illustration videos are stored in [ILID-ICML24/performance](https://github.com/HansenHua/ILID-ICML24/tree/main/performance).
 
 ## :e-mail: Contact
 
-If you have any question, please email `xingyuanhua@bit.edu.cn`.
+If you have any question, please email `huaxy24@mails.tsinghua.edu.cn`.
